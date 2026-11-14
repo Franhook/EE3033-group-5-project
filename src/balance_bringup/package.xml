@@ -1,0 +1,51 @@
+<?xml version="1.0"?>
+<?xml-model
+  href="http://download.ros.org/schema/package_format3.xsd"
+  schematypens="http://www.w3.org/2001/XMLSchema"?>
+
+<package format="3">
+
+  <name>balance_bringup</name>
+  <version>0.0.1</version>
+
+  <description>
+    Combined bringup launch files for the self-balancing robot.
+  </description>
+
+  <maintainer email="balance@example.com">
+    balance
+  </maintainer>
+
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>
+    ament_python
+  </buildtool_depend>
+
+  <!-- Required by the Python launch file -->
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+
+  <!-- Packages included by the parent launch file -->
+  <exec_depend>balance_robot_base</exec_depend>
+  <exec_depend>balance_mapping</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>balance_navigation</exec_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
+  <exec_depend>balance_mission</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+
+</package>

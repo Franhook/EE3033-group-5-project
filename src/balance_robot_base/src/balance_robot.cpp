@@ -1,0 +1,803 @@
+#include "balance_robot_base/balance_robot.h"
+
+using namespace std::chrono_literals;
+
+// Define covariance matrices
+const double odom_pose_covariance[36]   = {1e-3, 0, 0, 0, 0, 0, 
+                                          0, 1e-3, 0, 0, 0, 0,
+                                          0, 0, 1e6, 0, 0, 0,
+                                          0, 0, 0, 1e6, 0, 0,
+                                          0, 0, 0, 0, 1e6, 0,
+                                          0, 0, 0, 0, 0, 1e3 };
+const double odom_pose_covariance2[36]  = {1e-9, 0, 0, 0, 0, 0, 
+                                          0, 1e-3, 1e-9, 0, 0, 0,
+                                          0, 0, 1e6, 0, 0, 0,
+                                          0, 0, 0, 1e6, 0, 0,
+                                          0, 0, 0, 0, 1e6, 0,
+                                          0, 0, 0, 0, 0, 1e-9 };
+const double odom_twist_covariance[36]  = {1e-3, 0, 0, 0, 0, 0, 
+                                          0, 1e-3, 0, 0, 0, 0,
+                                          0, 0, 1e6, 0, 0, 0,
+                                          0, 0, 0, 1e6, 0, 0,
+                                          0, 0, 0, 0, 1e6, 0,
+                                          0, 0, 0, 0, 0, 1e3 };
+const double odom_twist_covariance2[36] = {1e-9, 0, 0, 0, 0, 0, 
+                                          0, 1e-3, 1e-9, 0, 0, 0,
+                                          0, 0, 1e6, 0, 0, 0,
+                                          0, 0, 0, 1e6, 0, 0,
+                                          0, 0, 0, 0, 1e6, 0,
+                                          0, 0, 0, 0, 0, 1e-9} ;
+
+BalanceRobot::BalanceRobot() 
+: Node("balance_robot_node"), power_voltage_(0.0),
+  target_cmd_x_(0.0), target_cmd_z_(0.0), 
+  current_cmd_x_(0.0), current_cmd_z_(0.0), 
+  current_acc_x_(0.0), current_acc_z_(0.0)
+{
+    // 1. Initialize data
+    memset(&robot_pos_, 0, sizeof(robot_pos_));
+    memset(&robot_vel_, 0, sizeof(robot_vel_));
+    memset(&receive_data_, 0, sizeof(receive_data_)); 
+    memset(&send_data_, 0, sizeof(send_data_));
+    memset(&mpu6050_raw_, 0, sizeof(mpu6050_raw_));
+
+    // 2. Declare and retrieve parameters
+    this->declare_parameter<double>("control_loop_freq", 50.0);
+    this->declare_parameter<std::string>("usart_port_name", "/dev/balance_controller");
+    this->declare_parameter<int>("serial_baud_rate", 115200);
+    this->declare_parameter<std::string>("odom_frame_id", "odom_combined");
+    this->declare_parameter<std::string>("robot_frame_id", "base_footprint");
+    this->declare_parameter<std::string>("gyro_frame_id", "gyro_link");
+
+    control_loop_freq_ = this->get_parameter("control_loop_freq").as_double();
+    usart_port_name_ = this->get_parameter("usart_port_name").as_string();
+    serial_baud_rate_ = this->get_parameter("serial_baud_rate").as_int();
+    odom_frame_id_ = this->get_parameter("odom_frame_id").as_string();
+    robot_frame_id_ = this->get_parameter("robot_frame_id").as_string();
+    gyro_frame_id_ = this->get_parameter("gyro_frame_id").as_string();
+
+    // Declare S-curve parameters 
+    this->declare_parameter<bool>("enable_s_curve", true);
+    this->declare_parameter<double>("max_accel_x", 0.8);
+    this->declare_parameter<double>("max_jerk_x", 3.0);
+    this->declare_parameter<double>("max_accel_z", 3.0);
+    this->declare_parameter<double>("max_jerk_z", 10.0);
+    this->declare_parameter<bool>("reset_odom", false);
+
+
+    //this->declare_parameter<double>("cmd_vel_timeout", 0.5);
+    //cmd_vel_timeout_sec_ = this->get_parameter("cmd_vel_timeout").as_double();
+    //last_cmd_time_ = std::chrono::steady_clock::now();
+
+    // Velocity command watchdog
+    this->declare_parameter<double>("cmd_vel_timeout", 0.5);
+    cmd_vel_timeout_sec_ = this->get_parameter("cmd_vel_timeout").as_double();
+    
+    // STM32 feedback watchdog
+    this->declare_parameter<double>("feedback_timeout", 0.2);
+    feedback_timeout_sec_ =this->get_parameter("feedback_timeout").as_double();
+    last_cmd_time_ = std::chrono::steady_clock::now();
+    last_feedback_time_ = std::chrono::steady_clock::now();
+
+
+    enable_s_curve_ = this->get_parameter("enable_s_curve").as_bool();
+    max_accel_x_ = this->get_parameter("max_accel_x").as_double();
+    max_jerk_x_ = this->get_parameter("max_jerk_x").as_double();
+    max_accel_z_ = this->get_parameter("max_accel_z").as_double();
+    max_jerk_z_ = this->get_parameter("max_jerk_z").as_double();
+
+    // Bind the dynamic-parameter callback
+    param_subscriber_ = this->add_on_set_parameters_callback(
+        std::bind(&BalanceRobot::parameters_callback, this, std::placeholders::_1));
+    // 3. Initialize publishers
+    voltage_publisher_ = this->create_publisher<std_msgs::msg::Float32>("power_voltage", 10);
+    odom_publisher_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", 50);
+    imu_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>("imu", 20);
+    euler_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("robot_euler", 20);
+    pid_publisher_ = this->create_publisher<balance_interface::msg::PIDParams>("pid_params", 10);
+    // 4. Initialize subscribers
+    cmd_vel_subscription_ = this->create_subscription<geometry_msgs::msg::Twist>(
+        "cmd_vel", 100, std::bind(&BalanceRobot::cmd_vel_callback, this, std::placeholders::_1));
+    pid_cmd_subscription_ = this->create_subscription<balance_interface::msg::PIDCommand>(
+        "pid_command", 10, std::bind(&BalanceRobot::pid_cmd_callback, this, std::placeholders::_1));
+    // 5. Initialize TF broadcasting
+    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+
+    // 6. Initialize the serial port
+    try {
+        stm32_serial_.setPort(usart_port_name_);
+        stm32_serial_.setBaudrate(serial_baud_rate_);
+        serial::Timeout _time = serial::Timeout::simpleTimeout(2000); 
+        stm32_serial_.setTimeout(_time);
+        stm32_serial_.open();
+        // Immediately release DTR and RTS so they no longer control BOOT0 and NRST
+        if (stm32_serial_.isOpen()) {
+            //stm32_serial_.setDTR(false);
+            //stm32_serial_.setRTS(false);
+            //RCLCPP_INFO(this->get_logger(), "Serial port opened. DTR & RTS released.");
+              RCLCPP_INFO(this->get_logger(),"Serial port opened.");
+	}
+    } 
+    catch (serial::IOException& e) {
+        RCLCPP_ERROR(this->get_logger(), "balance_robot_base can not open serial port: %s", usart_port_name_.c_str());
+        RCLCPP_ERROR(this->get_logger(), "Please check the serial port cable!");
+    }
+
+    // 7. Initialize the timer (control loop))
+    int timer_ms = static_cast<int>(1000.0 / control_loop_freq_);
+    timer_ = this->create_wall_timer(
+        std::chrono::milliseconds(timer_ms), std::bind(&BalanceRobot::control_loop, this));
+    
+    // Initialize time
+    last_time_ = this->get_clock()->now();
+}
+
+BalanceRobot::~BalanceRobot()
+{
+    // Send a stop command before destruction
+    send_data_.tx_buffer[0] = FRAME_HEADER;
+    send_data_.tx_buffer[1] = 'S';
+    send_data_.tx_buffer[2] = ':';
+    
+    // Set velocity to zero
+    send_data_.tx_buffer[3] = 0; send_data_.tx_buffer[4] = 0;
+    send_data_.tx_buffer[5] = 0; send_data_.tx_buffer[6] = 0;
+    send_data_.tx_buffer[7] = 0; send_data_.tx_buffer[8] = 0;
+
+    send_data_.tx_buffer[9] = check_sum(9, CHECK_MODE_SEND);
+    send_data_.tx_buffer[10] = FRAME_TAIL;
+
+    try {
+        stm32_serial_.write(send_data_.tx_buffer, SEND_DATA_SIZE);
+    } catch (serial::IOException& e) {
+        RCLCPP_ERROR(this->get_logger(), "Unable to send stop command");
+    }
+    stm32_serial_.close();
+    RCLCPP_INFO(this->get_logger(), "Shutting down balance_robot_base node");
+}
+
+// --- Velocity-control callback ---
+//void BalanceRobot::cmd_vel_callback(const geometry_msgs::msg::Twist::SharedPtr msg)
+//{
+    // Only update the target velocity
+//    target_cmd_x_ = msg->linear.x;
+//    target_cmd_z_ = msg->angular.z;
+//}
+
+void BalanceRobot::cmd_vel_callback(
+    const geometry_msgs::msg::Twist::SharedPtr msg)
+{
+    target_cmd_x_ = msg->linear.x;
+    target_cmd_z_ = msg->angular.z;
+
+    // Refresh the velocity command watchdog
+    last_cmd_time_ = std::chrono::steady_clock::now();
+}
+
+
+
+
+// --- Receive PID control frames from the GUI and forward them ---
+void BalanceRobot::pid_cmd_callback(const balance_interface::msg::PIDCommand::SharedPtr msg)
+{
+    char cmd_buf[128];
+    int len = 0;
+
+    switch (msg->command_type) {
+        case balance_interface::msg::PIDCommand::CMD_SAVE:
+            len = snprintf(cmd_buf, sizeof(cmd_buf), "{P:SAVE}");
+            break;
+            
+        case balance_interface::msg::PIDCommand::CMD_GET:
+            len = snprintf(cmd_buf, sizeof(cmd_buf), "{P:GET}");
+            break;
+            
+        case balance_interface::msg::PIDCommand::CMD_SET_ALL:
+            len = snprintf(cmd_buf, sizeof(cmd_buf), "{P:#:%d:%d:%d:%d:%d:%d:%d:%d}",
+                   (int)(msg->balance_kp * 100.0f),
+                   (int)(msg->balance_kd * 100.0f),
+                   (int)(msg->velocity_kp * 1000.0f),
+                   (int)(msg->velocity_ki * 1000.0f),
+                   (int)(msg->turn_kp * 1000.0f),
+                   (int)(msg->turn_ki * 1000.0f),
+                   (int)(msg->turn_kd * 1000.0f),
+                   (int)(msg->middle_angle * 10.0f));
+    break;
+            
+        case balance_interface::msg::PIDCommand::CMD_SET_SINGLE:
+            int scaled_val = 0;
+            if (msg->param_id == 8) {
+                scaled_val = (int)(msg->param_value * 10.0f);   // ID=8 Mechanical midpoint *10
+            } else if (msg->param_id == 1 || msg->param_id == 2) {
+                scaled_val = (int)(msg->param_value * 100.0f);  // ID=1,2 Balance loop *100
+            } else {
+                scaled_val = (int)(msg->param_value * 1000.0f); // Velocity/steering *1000
+            }
+            len = snprintf(cmd_buf, sizeof(cmd_buf), "{P:%d:%d}", msg->param_id, scaled_val);
+            break;
+    }
+    
+    if (len > 0) {
+        try {
+            stm32_serial_.write(reinterpret_cast<const uint8_t*>(cmd_buf), len);
+            RCLCPP_INFO(this->get_logger(), "PID Command: %s", cmd_buf);
+        } catch (serial::IOException& e) {
+            RCLCPP_ERROR(this->get_logger(), "Serial hardware rejected PID transmission.");
+        }
+    }
+}
+
+// --- Serial-read logic ---
+bool BalanceRobot::get_sensor_data()
+{
+    bool has_new_data = false;
+
+    enum class ParserState {
+        WAIT_HEADER,
+        IDENTIFY_PACKET,
+        READ_SENSOR_PACKET,
+        READ_PID_PACKET
+    };
+
+    static ParserState state = ParserState::WAIT_HEADER;
+    static uint8_t sensor_buffer[RECEIVE_DATA_SIZE];
+    static char pid_buffer[128];
+    static size_t count = 0;
+
+    uint8_t temp_buffer[1];
+
+    while (stm32_serial_.available())
+    {
+        stm32_serial_.read(temp_buffer, 1);
+        const uint8_t byte = temp_buffer[0];
+
+        if (state == ParserState::WAIT_HEADER)
+        {
+            if (byte == FRAME_HEADER)
+            {
+                sensor_buffer[0] = byte;
+                count = 1;
+                state = ParserState::IDENTIFY_PACKET;
+            }
+            continue;
+        }
+
+        if (state == ParserState::IDENTIFY_PACKET)
+        {
+            if (byte == 'D')
+            {
+                sensor_buffer[1] = byte;
+                count = 2;
+                state = ParserState::READ_SENSOR_PACKET;
+            }
+            else if (byte == 'P')
+            {
+                pid_buffer[0] = static_cast<char>(FRAME_HEADER);
+                pid_buffer[1] = 'P';
+                count = 2;
+                state = ParserState::READ_PID_PACKET;
+            }
+            else if (byte == FRAME_HEADER)
+            {
+                // Restart synchronisation at the newest header.
+                sensor_buffer[0] = byte;
+                count = 1;
+            }
+            else
+            {
+                count = 0;
+                state = ParserState::WAIT_HEADER;
+            }
+            continue;
+        }
+
+        if (state == ParserState::READ_SENSOR_PACKET)
+        {
+            if (count >= RECEIVE_DATA_SIZE)
+            {
+                count = 0;
+                state = ParserState::WAIT_HEADER;
+                continue;
+            }
+
+            sensor_buffer[count++] = byte;
+
+            if (count == RECEIVE_DATA_SIZE)
+            {
+                bool valid = (sensor_buffer[31] == FRAME_TAIL);
+
+                if (valid)
+                {
+                    unsigned char checksum = 0;
+
+                    for (size_t i = 0; i < 30; ++i)
+                    {
+                        checksum ^= sensor_buffer[i];
+                    }
+
+                    valid = (checksum == sensor_buffer[30]);
+                }
+
+                if (valid)
+                {
+                    for (size_t i = 0; i < RECEIVE_DATA_SIZE; ++i)
+                    {
+                        receive_data_.rx_buffer[i] = sensor_buffer[i];
+                    }
+
+                    robot_vel_.x = odom_trans(sensor_buffer[4], sensor_buffer[5]);
+                    robot_vel_.y = odom_trans(sensor_buffer[6], sensor_buffer[7]);
+                    robot_vel_.z = odom_trans(sensor_buffer[8], sensor_buffer[9]);
+
+                    mpu6050_raw_.accel_x = imu_trans(sensor_buffer[10], sensor_buffer[11]);
+                    mpu6050_raw_.accel_y = imu_trans(sensor_buffer[12], sensor_buffer[13]);
+                    mpu6050_raw_.accel_z = imu_trans(sensor_buffer[14], sensor_buffer[15]);
+
+                    mpu6050_raw_.gyro_x = imu_trans(sensor_buffer[16], sensor_buffer[17]);
+                    mpu6050_raw_.gyro_y = imu_trans(sensor_buffer[18], sensor_buffer[19]);
+                    mpu6050_raw_.gyro_z = imu_trans(sensor_buffer[20], sensor_buffer[21]);
+
+                    short voltage_raw =
+                        (static_cast<unsigned short>(sensor_buffer[22]) << 8) |
+                        static_cast<unsigned short>(sensor_buffer[23]);
+
+                    power_voltage_ = static_cast<float>(voltage_raw) / 1000.0f;
+
+                    stm32_pitch_ =
+                        static_cast<float>(imu_trans(sensor_buffer[24], sensor_buffer[25])) / 100.0f;
+
+                    stm32_roll_ =
+                        static_cast<float>(imu_trans(sensor_buffer[26], sensor_buffer[27])) / 100.0f;
+
+                    stm32_yaw_ =
+                        static_cast<float>(imu_trans(sensor_buffer[28], sensor_buffer[29])) / 100.0f;
+
+                    has_new_data = true;
+
+                    RCLCPP_INFO_THROTTLE(
+                        this->get_logger(),
+                        *this->get_clock(),
+                        1000,
+                        "STM32 feedback valid. Velocity: X=%.3f Y=%.3f Z=%.3f",
+                        robot_vel_.x,
+                        robot_vel_.y,
+                        robot_vel_.z);
+                }
+                else
+                {
+                    RCLCPP_WARN_THROTTLE(
+                        this->get_logger(),
+                        *this->get_clock(),
+                        1000,
+                        "Invalid STM32 sensor packet: checksum or footer error");
+                }
+
+                count = 0;
+                state = ParserState::WAIT_HEADER;
+            }
+
+            continue;
+        }
+
+        if (state == ParserState::READ_PID_PACKET)
+        {
+            if (count >= sizeof(pid_buffer) - 1)
+            {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "PID response exceeded buffer size");
+
+                count = 0;
+                state = ParserState::WAIT_HEADER;
+                continue;
+            }
+
+            pid_buffer[count++] = static_cast<char>(byte);
+
+            if (byte == FRAME_TAIL)
+            {
+                pid_buffer[count] = '\0';
+
+                int kp1, kd1, kp2, ki2, kp3, ki3, kd3, mid_ang;
+
+                if (sscanf(
+                        pid_buffer,
+                        "{P:$:%d:%d:%d:%d:%d:%d:%d:%d}",
+                        &kp1, &kd1, &kp2, &ki2,
+                        &kp3, &ki3, &kd3, &mid_ang) == 8)
+                {
+                    balance_interface::msg::PIDParams pid_msg;
+
+                    pid_msg.balance_kp = kp1 / 100.0f;
+                    pid_msg.balance_kd = kd1 / 100.0f;
+                    pid_msg.velocity_kp = kp2 / 1000.0f;
+                    pid_msg.velocity_ki = ki2 / 1000.0f;
+                    pid_msg.turn_kp = kp3 / 1000.0f;
+                    pid_msg.turn_ki = ki3 / 1000.0f;
+                    pid_msg.turn_kd = kd3 / 1000.0f;
+                    pid_msg.middle_angle = mid_ang / 10.0f;
+
+                    pid_publisher_->publish(pid_msg);
+
+                    RCLCPP_INFO(
+                        this->get_logger(),
+                        "Received PID parameters successfully");
+                }
+                else
+                {
+                    RCLCPP_WARN(
+                        this->get_logger(),
+                        "Received malformed PID response");
+                }
+
+                count = 0;
+                state = ParserState::WAIT_HEADER;
+            }
+        }
+    }
+
+    return has_new_data;
+}
+
+// --- Send velocity commands to STM32 STM32 ---
+
+void BalanceRobot::send_velocity_to_stm32(double linear_x, double angular_z)
+{
+    short transition; 
+    send_data_.tx_buffer[0] = FRAME_HEADER;
+    send_data_.tx_buffer[1] = 'S'; 
+    send_data_.tx_buffer[2] = ':'; 
+
+    // XX-axis velocity (m/s -> mm/s)
+    transition = static_cast<short>(linear_x * 1000);
+    send_data_.tx_buffer[4] = transition;     
+    send_data_.tx_buffer[3] = transition >> 8; 
+
+    // YY-axis velocity
+    transition = static_cast<short>(0.0);
+    send_data_.tx_buffer[6] = transition;
+    send_data_.tx_buffer[5] = transition >> 8;
+
+    // ZZ-axis angular velocity (rad/s -> mrad/s)
+    transition = static_cast<short>(angular_z * 1000);
+    send_data_.tx_buffer[8] = transition;
+    send_data_.tx_buffer[7] = transition >> 8;
+
+    send_data_.tx_buffer[9] = check_sum(9, CHECK_MODE_SEND);
+    send_data_.tx_buffer[10] = FRAME_TAIL;
+
+    try {
+        stm32_serial_.write(send_data_.tx_buffer, SEND_DATA_SIZE);
+    } 
+    catch (serial::IOException& e) {
+        RCLCPP_ERROR(this->get_logger(), "Serial send failed");
+    }
+}
+
+// --- Publish odometry ---
+void BalanceRobot::publish_odom()
+{
+    // A. Broadcast TF TF (odom -> base_footprint)
+    geometry_msgs::msg::TransformStamped odom_tf;
+    odom_tf.header.stamp = now_time_;
+    odom_tf.header.frame_id = odom_frame_id_;
+    odom_tf.child_frame_id = robot_frame_id_;
+
+    odom_tf.transform.translation.x = robot_pos_.x;
+    odom_tf.transform.translation.y = robot_pos_.y;
+    odom_tf.transform.translation.z = 0.0;
+
+    tf2::Quaternion q;
+    q.setRPY(0, 0, robot_pos_.z);
+    odom_tf.transform.rotation = tf2::toMsg(q);
+
+    tf_broadcaster_->sendTransform(odom_tf);
+
+    // B. Publish the Odom topic
+    nav_msgs::msg::Odometry odom_msg;
+    odom_msg.header.stamp = now_time_;
+    odom_msg.header.frame_id = odom_frame_id_;
+    odom_msg.child_frame_id = robot_frame_id_;
+
+    // Position
+    odom_msg.pose.pose.position.x = robot_pos_.x;
+    odom_msg.pose.pose.position.y = robot_pos_.y;
+    odom_msg.pose.pose.position.z = 0.0;
+    odom_msg.pose.pose.orientation = odom_tf.transform.rotation;
+
+    // Velocity
+    odom_msg.twist.twist.linear.x = robot_vel_.x;
+    odom_msg.twist.twist.linear.y = robot_vel_.y;
+    odom_msg.twist.twist.angular.z = robot_vel_.z;
+
+    // Covariance (select a matrix according to whether the robot is stationary))
+    if(robot_vel_.x == 0 && robot_vel_.y == 0 && robot_vel_.z == 0) {
+        std::copy(std::begin(odom_pose_covariance2), std::end(odom_pose_covariance2), odom_msg.pose.covariance.begin());
+        std::copy(std::begin(odom_twist_covariance2), std::end(odom_twist_covariance2), odom_msg.twist.covariance.begin());
+    } else {
+        std::copy(std::begin(odom_pose_covariance), std::end(odom_pose_covariance), odom_msg.pose.covariance.begin());
+        std::copy(std::begin(odom_twist_covariance), std::end(odom_twist_covariance), odom_msg.twist.covariance.begin());
+    }
+
+    odom_publisher_->publish(odom_msg);
+}
+
+// --- Publish IMU data IMU ---
+void BalanceRobot::publish_imu()
+{
+    sensor_msgs::msg::Imu imu_msg;
+    imu_msg.header.stamp = now_time_;
+    imu_msg.header.frame_id = gyro_frame_id_;
+
+    // Quaternion (from the solution result))
+    imu_msg.orientation.x = quaternion_solution_.getQ1();
+    imu_msg.orientation.y = quaternion_solution_.getQ2();
+    imu_msg.orientation.z = quaternion_solution_.getQ3();
+    imu_msg.orientation.w = quaternion_solution_.getQ0();
+    
+    // Covariance (Hardcode)
+    imu_msg.orientation_covariance[0] = 1e6;
+    imu_msg.orientation_covariance[4] = 1e6;
+    imu_msg.orientation_covariance[8] = 1e-6;
+
+    // Angular velocity
+    imu_msg.angular_velocity.x = (mpu6050_raw_.gyro_x / 4.0f) * GYROSCOPE_RATIO;
+    imu_msg.angular_velocity.y = (mpu6050_raw_.gyro_y / 4.0f) * GYROSCOPE_RATIO;
+    imu_msg.angular_velocity.z = (mpu6050_raw_.gyro_z / 4.0f) * GYROSCOPE_RATIO;
+    
+    imu_msg.angular_velocity_covariance[0] = 1e6;
+    imu_msg.angular_velocity_covariance[4] = 1e6;
+    imu_msg.angular_velocity_covariance[8] = 1e-6;
+
+    // Linear acceleration
+    imu_msg.linear_acceleration.x = mpu6050_raw_.accel_x / ACCEL_RATIO;
+    imu_msg.linear_acceleration.y = mpu6050_raw_.accel_y / ACCEL_RATIO;
+    imu_msg.linear_acceleration.z = mpu6050_raw_.accel_z / ACCEL_RATIO;
+
+    imu_publisher_->publish(imu_msg);
+}
+
+// --- Publish voltage ---
+void BalanceRobot::publish_voltage()
+{
+    static int count = 0;
+    if (count++ > 10) // Publish at a reduced frequency
+    {
+        count = 0;
+        std_msgs::msg::Float32 volt_msg;
+        volt_msg.data = power_voltage_;
+        voltage_publisher_->publish(volt_msg);
+    }
+}
+
+// --- Publish Euler angles ---
+void BalanceRobot::publish_euler()
+{
+    geometry_msgs::msg::Vector3Stamped euler_msg;
+    euler_msg.header.stamp = now_time_;
+    euler_msg.header.frame_id = robot_frame_id_;
+    // Convert degrees to radians 
+    euler_msg.vector.x = stm32_roll_ * M_PI / 180.0;
+    euler_msg.vector.y = stm32_pitch_ * M_PI / 180.0;
+    euler_msg.vector.z = stm32_yaw_ * M_PI / 180.0; 
+    
+    euler_publisher_->publish(euler_msg);
+}
+
+// --- Helper functions ---
+// Checksum
+unsigned char BalanceRobot::check_sum(unsigned char count_number, unsigned char mode)
+{
+    unsigned char check_sum = 0, k;
+    if (mode == CHECK_MODE_RECEIVE) {
+        for (k = 0; k < count_number; k++) {
+            check_sum = check_sum ^ receive_data_.rx_buffer[k];
+        }
+    } else if (mode == CHECK_MODE_SEND) {
+        for (k = 0; k < count_number; k++) {
+            check_sum = check_sum ^ send_data_.tx_buffer[k];
+        }
+    }
+    return check_sum;
+}
+
+short BalanceRobot::imu_trans(uint8_t data_high, uint8_t data_low)
+{
+    short transition_16 = 0;
+    transition_16 |= data_high << 8;
+    transition_16 |= data_low;
+    return transition_16;
+}
+
+float BalanceRobot::odom_trans(uint8_t data_high, uint8_t data_low)
+{
+    float data_return;
+    short transition_16 = 0;
+    transition_16 |= data_high << 8;
+    transition_16 |= data_low;
+    // Velocity units mm/s -> m/s
+    data_return = transition_16 / 1000.0f;
+    return data_return;
+}
+
+// Dynamic-parameter callback: handle online modifications from the GUI
+rcl_interfaces::msg::SetParametersResult BalanceRobot::parameters_callback(
+    const std::vector<rclcpp::Parameter> &parameters)
+{
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+    for (const auto &param : parameters) {
+        if (param.get_name() == "enable_s_curve") enable_s_curve_ = param.as_bool();
+        else if (param.get_name() == "max_accel_x") max_accel_x_ = param.as_double();
+        else if (param.get_name() == "max_jerk_x") max_jerk_x_ = param.as_double();
+        else if (param.get_name() == "reset_odom" && param.as_bool() == true) {
+            robot_pos_.x = 0.0;
+            robot_pos_.y = 0.0;
+            robot_pos_.z = 0.0;
+            RCLCPP_INFO(this->get_logger(), "Odometry forcefully reset to ZERO by GUI.");
+        }
+    }
+    RCLCPP_INFO(this->get_logger(), "S-Curve settings updated. Enabled: %d", enable_s_curve_);
+    return result;
+}
+
+// -- Asymmetric second-order smoother with jerk limiting --
+void BalanceRobot::apply_s_curve(double &current_v, double &current_a, double target_v, 
+                                 double dt, double max_a, double max_j)
+{
+    if (!enable_s_curve_) {
+        current_v = target_v;
+        current_a = 0.0;
+        return;
+    }
+
+    // Determine whether braking/deceleration is active: the target-speed magnitude is below the current-speed magnitude, or their signs differ
+    bool is_braking = (std::abs(target_v) < std::abs(current_v)) || (target_v * current_v < 0);
+    // Dynamically allocate acceleration and jerk limits
+    double active_max_a = is_braking ? (max_a * 3.0) : max_a;
+    double active_max_j = is_braking ? (max_j * 5.0) : max_j;
+    // Desired acceleration
+    double p_gain_v = is_braking ? 10.0 : 4.0;  
+    double desired_a = (target_v - current_v) * p_gain_v;
+    desired_a = std::clamp(desired_a, -active_max_a, active_max_a);
+    // Desired jerk
+    double p_gain_a = is_braking ? 45.0 : 20.0; 
+    double desired_j = (desired_a - current_a) * p_gain_a;
+    desired_j = std::clamp(desired_j, -active_max_j, active_max_j);
+    // Integrate to produce the physical output
+    current_a += desired_j * dt;
+    current_v += current_a * dt;
+    // Prevent small high-frequency oscillations near the target
+    if(std::abs(target_v - current_v) < 0.001 && std::abs(current_a) < 0.01) {
+        current_v = target_v;
+        current_a = 0.0;
+    }
+}
+
+// --- Main control loop ---
+void BalanceRobot::control_loop()
+{
+    now_time_ = this->get_clock()->now();
+    double dt = (now_time_ - last_time_).seconds();
+    if (dt <= 0.001) dt = 1.0 / control_loop_freq_; // Protection against division by zero
+    last_time_ = now_time_;
+
+    RCLCPP_INFO_THROTTLE(this->get_logger(), * this->get_clock(), 2000, "Control loop dt: %.4f seconds (%.1f Hz)", dt, 1.0 / dt);
+
+    // SCalculate S-curve velocity and send it to the microcontroller
+   // apply_s_curve(current_cmd_x_, current_acc_x_, target_cmd_x_, dt, max_accel_x_, max_jerk_x_);
+   // apply_s_curve(current_cmd_z_, current_acc_z_, target_cmd_z_, dt, max_accel_z_, max_jerk_z_);
+   // Velocity command watchdog
+   const auto current_steady_time = std::chrono::steady_clock::now();
+   const double cmd_age = std::chrono::duration<double>(current_steady_time - last_cmd_time_).count();
+   if (cmd_age > cmd_vel_timeout_sec_)
+   {
+    target_cmd_x_ = 0.0;
+    target_cmd_z_ = 0.0;
+    }
+    
+    // Apply S-curve velocity control
+    apply_s_curve(
+        current_cmd_x_,
+        current_acc_x_,
+        target_cmd_x_,
+        dt,
+        max_accel_x_,
+        max_jerk_x_
+    );
+    
+    apply_s_curve(
+        current_cmd_z_,
+        current_acc_z_,
+        target_cmd_z_,
+        dt,
+        max_accel_z_,
+        max_jerk_z_
+    );
+    
+
+
+    //send_velocity_to_stm32(current_cmd_x_, current_cmd_z_);
+
+    // Read and parse data
+    //get_sensor_data();
+
+    send_velocity_to_stm32(current_cmd_x_, current_cmd_z_);
+    // Read and parse STM32 feedback once
+    const bool received_valid_feedback = get_sensor_data();
+
+
+
+    // Integrate odometry
+    //double delta_x = (robot_vel_.x * cos(robot_pos_.z) - robot_vel_.y * sin(robot_pos_.z)) * dt;
+    //double delta_y = (robot_vel_.x * sin(robot_pos_.z) + robot_vel_.y * cos(robot_pos_.z)) * dt;
+    //double delta_th = robot_vel_.z * dt * 1.05; // Empirical correction
+
+    //robot_pos_.x += delta_x;
+    //robot_pos_.y += delta_y;
+    //robot_pos_.z += delta_th;
+
+    // Read and parse STM32 feedback
+    // const bool received_valid_feedback = get_sensor_data();
+    const auto feedback_now = std::chrono::steady_clock::now();
+    if (received_valid_feedback)
+    {
+        last_feedback_time_ = feedback_now;
+    }
+    // Check whether STM32 feedback has become stale
+    const double feedback_age = std::chrono::duration<double>(feedback_now - last_feedback_time_).count();
+    if (feedback_age > feedback_timeout_sec_)
+    {
+         // Prevent stale velocity from corrupting odometry
+         robot_vel_.x = 0.0;
+         robot_vel_.y = 0.0;
+         robot_vel_.z = 0.0;
+         
+         RCLCPP_WARN_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            2000,
+            "STM32 feedback timeout: stopping odometry integration"
+        );
+    }
+    
+    // Integrate odometry using the latest valid feedback
+    double delta_x =(robot_vel_.x * cos(robot_pos_.z) - robot_vel_.y * sin(robot_pos_.z)) * dt;
+    double delta_y = (robot_vel_.x * sin(robot_pos_.z)+ robot_vel_.y * cos(robot_pos_.z)) * dt;
+    double delta_th = robot_vel_.z * dt * 1.05;
+    
+    robot_pos_.x += delta_x;
+    robot_pos_.y += delta_y;
+    robot_pos_.z += delta_th;
+
+
+
+
+    // Attitude estimation
+    float ax = mpu6050_raw_.accel_x / ACCEL_RATIO;
+    float ay = mpu6050_raw_.accel_y / ACCEL_RATIO + 0.2f;
+    float az = mpu6050_raw_.accel_z / ACCEL_RATIO;
+    float gx = mpu6050_raw_.gyro_x * GYROSCOPE_RATIO - 0.01f;
+    float gy = mpu6050_raw_.gyro_y * GYROSCOPE_RATIO;
+    float gz = mpu6050_raw_.gyro_z * GYROSCOPE_RATIO;
+    quaternion_solution_.update(gx, gy, gz, ax, ay, az, dt);
+
+    // Publish topics
+    publish_odom();
+    publish_imu();
+    publish_voltage();
+    publish_euler();
+}
+
+int main(int argc, char * argv[])
+{
+  // Initialize ROS 2 ROS 2
+  rclcpp::init(argc, argv);
+  // Create the node instance
+  auto node = std::make_shared<BalanceRobot>();
+  // Run the node
+  rclcpp::spin(node);
+  // Shut down and clean up
+  rclcpp::shutdown();
+  return 0;
+}

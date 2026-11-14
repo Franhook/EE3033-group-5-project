@@ -1,0 +1,41 @@
+balance_robot_node:
+  ros__parameters:
+    control_loop_freq: 50.0
+
+    # --- 1. Serial-port settings ---
+    usart_port_name: "/dev/balance_controller" 
+    serial_baud_rate: 115200
+
+    # --- 2. TF TF frame names (used consistently throughout the system)) ---
+    odom_frame_id: "odom_combined"
+    robot_frame_id: "base_footprint"
+    gyro_frame_id: "gyro_link"
+    camera_frame_id: "camera_link"
+    laser_frame_id: "laser"
+
+    # --- 3. Physical offsets for the robot's static TF transforms ---
+    tf_parameters:
+      laser:
+        x: 0.002
+        y: 0.0
+        z: 0.1875
+        
+      camera:
+        x: -0.035
+        y: 0.0
+        z: 0.2655
+        pitch: 0.0   # Camera hinge pitch angle
+        
+      gyro:
+        x: -0.02
+        y: -0.04
+        z: 0.155
+    
+    # --- 4. S S-curve smoothing ---
+    enable_s_curve: true
+    # Linear-velocity X-axis limits
+    max_accel_x: 0.3  # Maximum acceleration (m/s^2)
+    max_jerk_x:  1.5  # Maximum jerk (m/s^3)
+    # Angular-velocity Z-axis limits
+    max_accel_z: 3.0  # (rad/s^2)
+    max_jerk_z:  15.0 # (rad/s^3)

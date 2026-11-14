@@ -1,0 +1,54 @@
+# balance_mission/config/mission_params.yaml
+# Step 2 (autonomous mission on the map built in Step 1)
+
+mission_manager:
+  ros__parameters:
+    map_frame: "map"
+    robot_frame: "base_footprint"
+
+    autostart: false            # false -> start with: ros2 service call /mission/start std_srvs/srv/Trigger
+    system_timeout_s: 90.0      # give up if Nav2 / TF / map are not ready
+    max_mission_time_s: 0.0     # 0 = no limit; e.g. 600.0 forces an early return
+
+    # Step 1 starts SLAM at the assigned start pose, so that pose is the map
+    # origin (0, 0, yaw 0).  Put the car on the same spot, facing the same
+    # way, before launching Step 2.  Change these if you start elsewhere.
+    publish_initial_pose: true
+    initial_pose: [0.0, 0.0, 0.0]   # x [m], y [m], yaw [rad] in the map frame
+    wait_for_amcl_s: 8.0
+
+    # Search strategy: coverage waypoints generated from the saved map
+    search_spacing: 0.9         # [m] distance between search points
+    search_clearance: 0.22      # [m] keep this far from walls/obstacles
+    max_search_loops: 2         # second pass uses a denser grid
+    loop_spacing_factor: 0.65
+    spin_at_waypoints: true     # 360 deg scan at each point
+    spin_angle: 6.2832
+    spin_time_allowance_s: 25.0
+    max_waypoint_failures: 6
+
+    # Target (x, y) estimate: stand still, collect samples, robust average
+    settle_time_s: 0.8
+    sample_window_s: 1.5
+    sample_timeout_s: 5.0
+    min_samples: 5
+    outlier_m: 0.15
+
+    return_max_retries: 3
+    return_match_start_yaw: false   # final heading is not part of the return rule
+    report_file: "~/ros2_target_report.yaml"
+
+target_confirmation_node:
+  ros__parameters:
+    required_detections: 2
+    max_gap_seconds: 0.8
+    max_center_shift_px: 100.0
+    gate_on_mission_state: true     # only count detections while state == SEARCH
+
+target_map_node:
+  ros__parameters:
+    map_frame: "map"
+
+target_localization_node:
+  ros__parameters:
+    camera_pitch_deg: -5.0
