@@ -1,0 +1,25 @@
+/object_detector_node:
+  ros__parameters:
+    yolo_model: "yolo26n.pt"  # May be changed to "yolo26n.pt" "yolo26s.pt" "yolo26m.pt" "yolo26l.pt"
+    reid_model: "osnet_x0_25"  # May be changed to "osnet_x1_0" "osnet_x0_75" "osnet_x0_5" "osnet_x0_25"
+    generic_model: "mobilenet_v3_small"  # May be changed to "mobilenet_v3_large" "mobilenet_v3_small"
+    rqt_view: False                      # Whether to enable the debugging interface
+
+    conf_thres: 0.3           # YOLO YOLO confidence threshold
+    person_match_thres: 0.65  # ReID ReID model matching threshold (0.0-1.0; higher is stricter))
+    object_match_thres: 0.65  # Generic Generic-model matching threshold
+    learning_thres: 0.80      # Target-profile creation/learning threshold
+    # Negative-sample blacklist mechanism
+    max_bank_size: 5          # Negative-sample blacklist capacity (0 disables it))
+    negative_ttl: 20.0        # Lifetime of a negative sample in the blacklist (seconds); delete it automatically after expiration  
+    # Loss and patrol-reset strategy
+    lost_timeout: 1.0         # Blind-prediction buffer time (seconds))
+    reset_timeout: 10.0       # After the target is lost for this duration, reset features and request patrol (seconds))
+
+    track_method: "kalman"            # Tracking-prediction algorithm switch: "none" (disabled), "kalman" (Kalman-filter prediction))
+    expand_ratio: 0.10                # Proportional expansion         
+    feature_update_rate: 0.05         # Learning rate for fusing new features; 0.0 disables it. Recommended value: 0.01-0.05 0.01 ~ 0.05
+    enable_point_undistortion: True   # Single-point distortion correction
+    use_compressed_image: True       # True: True: use for cross-machine operation over Wi-Fi; False: use when running on the same Raspberry Pi
+
+
