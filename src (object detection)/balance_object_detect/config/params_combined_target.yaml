@@ -1,0 +1,25 @@
+/object_detector_node:
+  ros__parameters:
+    yolo_model: "yolo26n.pt"
+    conf_thres: 0.30
+    use_compressed_image: true
+    yolo_allowed_labels: ["apple", "bottle", "banana", "orange", "cup", "stop sign"]
+    yolo_confirm_frames: 2
+    lost_timeout: 1.0
+    required_detections: 2
+    max_gap_seconds: 0.8
+    max_center_shift_px: 100.0
+    gate_on_mission_state: true
+    rotate_image_180: true
+    fx: 303.58978001
+    fy: 302.97064273
+    cx: 325.24190807
+    cy: 220.28007631
+    image_width: 640
+    image_height: 480
+    camera_x: -0.035
+    camera_y: 0.0
+    camera_height: 0.09
+    camera_pitch_deg: -5.0
+    base_frame: "base_footprint"
+    map_frame: "map"
