@@ -1,0 +1,9 @@
+/usb_cam:
+  ros__parameters:
+    video_device: "/dev/video0"
+    framerate: 10.0
+    image_width: 640
+    image_height: 480
+    pixel_format: "mjpeg2rgb"
+    camera_name: "usb_cam"
+    camera_info_url: "package://balance_usb_cam/config/camera_info.yaml"

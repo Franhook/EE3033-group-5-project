@@ -1,0 +1,16 @@
+# balance_mapping/config/explore_params.yaml  (Step 1: autonomous mapping)
+explore_node:
+  ros__parameters:
+    robot_base_frame: "base_footprint"
+    costmap_topic: "/global_costmap/costmap"
+    costmap_updates_topic: "/global_costmap/costmap_updates"
+    visualize: true
+    planner_frequency: 0.5        # [Hz] re-evaluate frontiers every 2 s (was 0.2 = 5 s)
+    progress_timeout: 20.0        # [s] blacklist a frontier after no progress
+    potential_scale: 3.0          # prefer close frontiers
+    orientation_scale: 0.0
+    gain_scale: 2.0               # prefer big unknown areas
+    transform_tolerance: 0.5
+    min_frontier_size: 0.25       # [m] was 0.12: that chased single-cell LiDAR noise
+                                  # and could keep exploration from ever finishing
+    return_to_init: true          # drive back to where mapping started when done

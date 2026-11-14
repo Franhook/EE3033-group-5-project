@@ -1,0 +1,25 @@
+/lslidar_driver_node:
+  ros__parameters: 
+    frame_id: laser                                       #Laser frame
+    group_ip: 224.1.1.2
+    add_multicast: false 
+    device_ip: 192.168.1.200                   	            #LiDAR sourceIP
+    device_ip_difop: 192.168.1.102                          #LiDAR destinationip
+    msop_port: 2368                                         #LiDAR destination port
+    difop_port: 2369                                        #LiDAR source port
+    lidar_name: N10                                         #LiDAR model selection:M10 M10_P M10_PLUS M10_GPS N10 L10 N10_P
+    angle_disable_min: 0.0                                  #Start angle for angular cropping (120.0)
+    angle_disable_max: 0.0                                  #End angle for angular cropping (240.0)
+    min_range: 0.0                                          #Minimum LiDAR reception range
+    max_range: 12.0                                        #Maximum LiDAR reception range (200.0)
+    use_gps_ts: false                                       #Whether the LiDAR uses GPS time synchronization
+    scan_topic: /scan                                       #Set the laser-data topic name
+    interface_selection: serial                             #Interface selection: net for Ethernet, serial for a serial port。
+    serial_port_: /dev/balance_lidar                              #Serial-port device used for the connection
+    high_reflection: false                                  #M10_P LiDAR requires this value; if unsure, contact technical support。
+    compensation: true				                              #M10 series: whether to use angle compensation
+    pubScan: true                                           #Whether to publish the scan topic
+    pubPointCloud2: false                                    #Whether to publish the PointCloud2 topic
+    pointcloud_topic: /lslidar_point_cloud                  #Set the laser-data topic name
+#    pcap: /home/ls/1.pcap                                  #Whether to read LiDAR data from a pcap file
+#    in_file_name: /home/ls/1.txt                           #Whether to read LiDAR data from a text file
