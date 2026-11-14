@@ -1,6 +1,0 @@
-# Request: contains a cropped image that includes the target
-sensor_msgs/Image target_image
----
-# Response: whether the target was set successfully
-bool success
-string message
